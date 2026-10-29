@@ -1,0 +1,618 @@
+openapi: 3.0.3
+info:
+  title: API Norylum Server
+  version: 1.0.0
+  description: |
+    Spécification canonique de l'API REST de l'écosystème Norylum (serveur média personnel auto-hébergé).
+    Cette API expose les opérations de vérification de santé, d'indexation de bibliothèque, de catalogue
+    multimédia, de streaming Direct Play haute performance (HTTP 206 Partial Content) et de suivi de progression de lecture.
+
+    ### Modèle de Sécurité Fail-Closed
+    Conformément aux exigences de sécurité de l'architecture Norylum :
+    - Toutes les routes de données et de streaming requièrent les en-têtes de contexte `x-account-id`, `x-profile-id` et `x-device-id`.
+    - Toute requête dépourvue de ces en-têtes ou non authentifiée est systématiquement rejetée avec une réponse HTTP `401 Unauthorized`.
+    - Le contrôle parental est appliqué via `x-is-child` et `x-age-rating-max` : l'accès aux médias non marqués comme sécurisés pour enfants ou dépassant la limite d'âge est rejeté avec un code HTTP `403 Forbidden`.
+    - Une isolation stricte contre le Directory Traversal est appliquée sur chaque accès physique aux fichiers média.
+  contact:
+    name: Équipe Core Norylum
+    url: https://github.com/norylum
+  license:
+    name: GPL-3.0-or-later
+    url: https://www.gnu.org/licenses/gpl-3.0.html
+
+servers:
+  - url: http://127.0.0.1:8120
+    description: Serveur Norylum local (Monolithe Modulaire)
+
+security:
+  - AccountContext: []
+    ProfileContext: []
+    DeviceContext: []
+
+tags:
+  - name: Health
+    description: Surveillance et disponibilité de l'instance
+  - name: Library
+    description: Scan et indexation du stockage multimédia
+  - name: Streaming
+    description: Diffusion vidéo Direct Play haute performance avec HTTP Range 206
+  - name: Playback
+    description: Suivi et synchronisation de la progression de lecture
+
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Vérification de l'état de santé du serveur
+      description: Endpoint public léger utilisé par les health checks, les reverse proxies et les orchestrateurs pour vérifier que l'instance Axum répond.
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Le serveur est opérationnel et prêt à traiter les requêtes.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: OK
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/library/scan:
+    post:
+      tags:
+        - Library
+      summary: Déclencher le scan et l'indexation de la bibliothèque
+      description: Parcourt récursivement le répertoire racine configuré (`NORYLUM_MEDIA_DIR`), analyse les métadonnées techniques via `ffprobe`, génère les identifiants techniques déterministes et met à jour l'inventaire du catalogue.
+      operationId: triggerLibraryScan
+      responses:
+        '200':
+          description: Scan de la bibliothèque terminé avec succès.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScanResponse'
+              example:
+                scanned_count: 2
+                message: "Scan terminé avec succès. 2 éléments indexés."
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/library/media:
+    get:
+      tags:
+        - Library
+      summary: Lister les médias indexés dans le catalogue
+      description: |
+        Retourne la liste des éléments multimédias indexés autorisés pour le profil appelant.
+        Si l'en-tête `x-is-child` vaut `true`, seuls les médias balisés `is_child_safe: true`
+        et ne dépassant pas `x-age-rating-max` sont retournés.
+      operationId: listLibraryMedia
+      parameters:
+        - $ref: '#/components/parameters/IsChildHeader'
+        - $ref: '#/components/parameters/AgeRatingMaxHeader'
+      responses:
+        '200':
+          description: Liste des médias autorisés pour le profil courant.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MediaItem'
+              example:
+                - id: "med_a1b2c3d4e5f60718"
+                  title: "super_lapin"
+                  file_path: "/media/dessins_animes/super_lapin.mp4"
+                  relative_path: "dessins_animes/super_lapin.mp4"
+                  file_size: 42000000
+                  duration_seconds: 720.5
+                  mime_type: "video/mp4"
+                  video_codec: "h264"
+                  audio_codec: "aac"
+                  width: 1920
+                  height: 1080
+                  is_child_safe: true
+                  age_rating: 0
+                - id: "med_9f8e7d6c5b4a3210"
+                  title: "film_action_adult_18+"
+                  file_path: "/media/film_action_adult_18+.mp4"
+                  relative_path: "film_action_adult_18+.mp4"
+                  file_size: 1540000000
+                  duration_seconds: 6840.0
+                  mime_type: "video/mp4"
+                  video_codec: "hevc"
+                  audio_codec: "ac3"
+                  width: 3840
+                  height: 2160
+                  is_child_safe: false
+                  age_rating: 18
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/media/{media_id}:
+    get:
+      tags:
+        - Streaming
+      summary: Streaming Direct Play HTTP avec support Range 206
+      description: |
+        Diffuse le fichier média en streaming par blocs bornés de 64 Ko ($O(1)$ RAM).
+        - En présence d'un en-tête `Range: bytes=start-end`, le serveur répond avec un code HTTP `206 Partial Content` et l'en-tête `Content-Range`.
+        - En l'absence de l'en-tête `Range`, le serveur diffuse la totalité du fichier avec un code HTTP `200 OK`.
+        - Si la plage demandée est hors limites, le serveur répond avec un code HTTP `416 Range Not Satisfiable`.
+        - L'accès est conditionné par la politique fail-closed (contrôle parental et isolation anti-Directory Traversal).
+      operationId: streamMedia
+      parameters:
+        - name: media_id
+          in: path
+          required: true
+          description: Identifiant déterministe unique du média
+          schema:
+            type: string
+            example: "med_a1b2c3d4e5f60718"
+        - $ref: '#/components/parameters/IsChildHeader'
+        - $ref: '#/components/parameters/AgeRatingMaxHeader'
+        - name: Range
+          in: header
+          required: false
+          description: "En-tête HTTP standard pour spécifier la plage d'octets demandée (ex: `bytes=0-1048575` ou `bytes=1048576-`)"
+          schema:
+            type: string
+            example: "bytes=0-1048575"
+      responses:
+        '200':
+          description: Streaming complet du fichier média.
+          headers:
+            Accept-Ranges:
+              schema:
+                type: string
+                example: bytes
+              description: Indique le support de requêtes par plage d'octets.
+            Content-Length:
+              schema:
+                type: integer
+                example: 42000000
+              description: Taille totale du média en octets.
+            Content-Type:
+              schema:
+                type: string
+                example: video/mp4
+              description: Type MIME du conteneur vidéo.
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+            video/x-matroska:
+              schema:
+                type: string
+                format: binary
+            video/webm:
+              schema:
+                type: string
+                format: binary
+            video/quicktime:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: Diffusion de la plage d'octets sollicitée (Direct Play / Fast-Forward).
+          headers:
+            Accept-Ranges:
+              schema:
+                type: string
+                example: bytes
+              description: Indique le support de requêtes par plage d'octets.
+            Content-Range:
+              schema:
+                type: string
+                example: bytes 0-1048575/42000000
+              description: Plage d'octets retournée et taille totale du fichier.
+            Content-Length:
+              schema:
+                type: integer
+                example: 1048576
+              description: Taille de la plage transmise en octets.
+            Content-Type:
+              schema:
+                type: string
+                example: video/mp4
+              description: Type MIME du conteneur vidéo.
+          content:
+            video/mp4:
+              schema:
+                type: string
+                format: binary
+            video/x-matroska:
+              schema:
+                type: string
+                format: binary
+            video/webm:
+              schema:
+                type: string
+                format: binary
+            video/quicktime:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '416':
+          $ref: '#/components/responses/RangeNotSatisfiableError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/playback/progress:
+    post:
+      tags:
+        - Playback
+      summary: Enregistrer la progression de lecture d'un média
+      description: |
+        Met à jour la position courante de lecture pour le profil appelant et le média spécifié.
+        Si la position dépasse 90% de la durée totale, le média est automatiquement marqué comme vu (`is_completed: true`).
+      operationId: updatePlaybackProgress
+      requestBody:
+        required: true
+        description: Données de progression de lecture transmises par le lecteur client.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProgressPayload'
+            example:
+              media_id: "med_a1b2c3d4e5f60718"
+              position_seconds: 650.0
+              duration_seconds: 720.5
+      responses:
+        '200':
+          description: Progression mise à jour avec succès.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaybackProgress'
+              example:
+                profile_id: "prof_enfant"
+                media_id: "med_a1b2c3d4e5f60718"
+                position_seconds: 650.0
+                duration_seconds: 720.5
+                is_completed: true
+                updated_at: "2026-10-29T14:40:00Z"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /v1/playback/{media_id}:
+    get:
+      tags:
+        - Playback
+      summary: Récupérer la progression de lecture d'un média
+      description: Retourne l'état de progression de lecture pour le média donné et le profil identifié dans le contexte.
+      operationId: getPlaybackProgress
+      parameters:
+        - name: media_id
+          in: path
+          required: true
+          description: Identifiant unique du média
+          schema:
+            type: string
+            example: "med_a1b2c3d4e5f60718"
+      responses:
+        '200':
+          description: Progression de lecture trouvée pour ce média.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlaybackProgress'
+              example:
+                profile_id: "prof_enfant"
+                media_id: "med_a1b2c3d4e5f60718"
+                position_seconds: 650.0
+                duration_seconds: 720.5
+                is_completed: true
+                updated_at: "2026-10-29T14:40:00Z"
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    AccountContext:
+      type: apiKey
+      in: header
+      name: x-account-id
+      description: Identifiant unique du compte Norylum associé à la requête.
+    ProfileContext:
+      type: apiKey
+      in: header
+      name: x-profile-id
+      description: Identifiant unique du profil utilisateur au sein du compte.
+    DeviceContext:
+      type: apiKey
+      in: header
+      name: x-device-id
+      description: Identifiant unique du terminal client émetteur (navigateur, application mobile, TV).
+
+  parameters:
+    IsChildHeader:
+      name: x-is-child
+      in: header
+      required: false
+      description: Indique si le profil actif est un profil enfant soumis aux règles de contrôle parental.
+      schema:
+        type: boolean
+        default: false
+        example: true
+
+    AgeRatingMaxHeader:
+      name: x-age-rating-max
+      in: header
+      required: false
+      description: Âge maximum autorisé pour le profil enfant courant (classification PEGI / CNC).
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 18
+        example: 10
+
+  schemas:
+    ScanResponse:
+      type: object
+      required:
+        - scanned_count
+        - message
+      properties:
+        scanned_count:
+          type: integer
+          description: Nombre total de fichiers vidéo indexés lors du scan.
+          example: 2
+        message:
+          type: string
+          description: Message récapitulatif de l'opération de scan.
+          example: "Scan terminé avec succès. 2 éléments indexés."
+
+    MediaItem:
+      type: object
+      required:
+        - id
+        - title
+        - file_path
+        - relative_path
+        - file_size
+        - duration_seconds
+        - mime_type
+        - is_child_safe
+      properties:
+        id:
+          type: string
+          description: Identifiant déterministe unique calculé par SHA-256 du chemin relatif et de la taille.
+          example: "med_a1b2c3d4e5f60718"
+        title:
+          type: string
+          description: Titre du média dérivé du nom de fichier nettoyé.
+          example: "super_lapin"
+        file_path:
+          type: string
+          description: Chemin absolu canonisé et isolé sur le système de fichiers serveur.
+          example: "/media/dessins_animes/super_lapin.mp4"
+        relative_path:
+          type: string
+          description: Chemin relatif normalisé depuis la racine de la bibliothèque.
+          example: "dessins_animes/super_lapin.mp4"
+        file_size:
+          type: integer
+          format: int64
+          description: Taille totale du fichier sur disque en octets.
+          example: 42000000
+        duration_seconds:
+          type: number
+          format: double
+          description: Durée du flux multimédia en secondes (extraite via ffprobe).
+          example: 720.5
+        mime_type:
+          type: string
+          description: Type MIME déduit du conteneur.
+          example: "video/mp4"
+        video_codec:
+          type: string
+          nullable: true
+          description: Codec du premier flux vidéo détecté (ex. h264, hevc, av1, vp9).
+          example: "h264"
+        audio_codec:
+          type: string
+          nullable: true
+          description: Codec du flux audio principal (ex. aac, ac3, eac3, mp3, opus).
+          example: "aac"
+        width:
+          type: integer
+          nullable: true
+          description: Largeur de l'image vidéo en pixels.
+          example: 1920
+        height:
+          type: integer
+          nullable: true
+          description: Hauteur de l'image vidéo en pixels.
+          example: 1080
+        is_child_safe:
+          type: boolean
+          description: Détermine si le média est sécurisé pour les profils enfants.
+          example: true
+        age_rating:
+          type: integer
+          nullable: true
+          description: Classification d'âge minimale requise (0, 10, 12, 16, 18).
+          example: 0
+
+    UpdateProgressPayload:
+      type: object
+      required:
+        - media_id
+        - position_seconds
+        - duration_seconds
+      properties:
+        media_id:
+          type: string
+          description: Identifiant du média en cours de lecture.
+          example: "med_a1b2c3d4e5f60718"
+        position_seconds:
+          type: number
+          format: double
+          description: Position de lecture actuelle en secondes.
+          example: 650.0
+        duration_seconds:
+          type: number
+          format: double
+          description: Durée totale de la vidéo en secondes.
+          example: 720.5
+
+    PlaybackProgress:
+      type: object
+      required:
+        - profile_id
+        - media_id
+        - position_seconds
+        - duration_seconds
+        - is_completed
+        - updated_at
+      properties:
+        profile_id:
+          type: string
+          description: Identifiant du profil utilisateur ayant effectué la lecture.
+          example: "prof_enfant"
+        media_id:
+          type: string
+          description: Identifiant unique du média.
+          example: "med_a1b2c3d4e5f60718"
+        position_seconds:
+          type: number
+          format: double
+          description: Dernière position de lecture enregistrée en secondes.
+          example: 650.0
+        duration_seconds:
+          type: number
+          format: double
+          description: Durée totale de la vidéo en secondes.
+          example: 720.5
+        is_completed:
+          type: boolean
+          description: Vaut true si au moins 90% du média a été lu.
+          example: true
+        updated_at:
+          type: string
+          format: date-time
+          description: Horodatage UTC de la dernière mise à jour de la progression.
+          example: "2026-10-29T14:40:00Z"
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - code
+      properties:
+        error:
+          type: string
+          description: Message d'erreur explicatif et contextuel.
+          example: "Authentification requise pour accéder aux ressources Norylum"
+        code:
+          type: string
+          description: Code machine canonique de l'erreur.
+          enum:
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - NOT_FOUND
+            - VALIDATION_ERROR
+            - DIRECTORY_TRAVERSAL
+            - RANGE_NOT_SATISFIABLE
+            - FFPROBE_ERROR
+            - IO_ERROR
+            - INTERNAL_SERVER_ERROR
+          example: "UNAUTHORIZED"
+
+  responses:
+    UnauthorizedError:
+      description: Contexte de requête non authentifié ou en-têtes obligatoires manquants.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: "Authentification requise pour accéder aux ressources Norylum"
+            code: "UNAUTHORIZED"
+
+    ForbiddenError:
+      description: Accès interdit (contrôle parental violé ou tentative de Directory Traversal).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: "Accès refusé au média 'med_9f8e7d6c5b4a3210' : profil enfant non autorisé"
+            code: "FORBIDDEN"
+
+    NotFoundError:
+      description: La ressource sollicitée (média, fichier ou progression) n'existe pas.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: "Média 'med_inconnu' introuvable"
+            code: "NOT_FOUND"
+
+    ValidationError:
+      description: Les données envoyées dans le corps de requête sont invalides ou incomplètes.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: "Format de données invalide"
+            code: "VALIDATION_ERROR"
+
+    RangeNotSatisfiableError:
+      description: Plage d'octets demandée hors des limites du fichier vidéo.
+      headers:
+        Accept-Ranges:
+          schema:
+            type: string
+            example: bytes
+          description: Indique le support de requêtes par plage d'octets.
+        Content-Range:
+          schema:
+            type: string
+            example: bytes */42000000
+          description: Longueur totale du fichier insatisfaisable.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: "Plage d'octets invalide (Range Not Satisfiable) : Début de plage supérieur à la taille totale"
+            code: "RANGE_NOT_SATISFIABLE"
+
+    InternalServerError:
+      description: Erreur inattendue au niveau du serveur Norylum (échec ffprobe, I/O système, etc.).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: "Erreur interne lors du traitement de la requête"
+            code: "INTERNAL_SERVER_ERROR"

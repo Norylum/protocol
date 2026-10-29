@@ -1,0 +1,163 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://schemas.norylum.org/v1/plugin-manifest.schema.json",
+  "title": "Norylum Plugin Manifest",
+  "description": "Schéma JSON officiel Draft 7 pour la validation du fichier manifeste 'plugin.json' des extensions et plugins de l'écosystème Norylum.",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "version",
+    "description",
+    "entrypoint",
+    "permissions"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "minLength": 3,
+      "maxLength": 64,
+      "description": "Identifiant unique et immuable du plugin en notation kebab-case (ex. 'tmdb-metadata', 'opensubtitles-provider')."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 100,
+      "description": "Nom lisible et humain du plugin affiché dans l'interface d'administration."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+      "description": "Version sémantique du plugin conforme à la spécification SemVer 2.0.0 (ex. '1.0.0', '0.2.1-beta')."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 500,
+      "description": "Description concise du rôle et des fonctionnalités offertes par l'extension."
+    },
+    "entrypoint": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Chemin relatif vers le point d'entrée exécutable, le binaire WASM ou le script principal (ex. 'dist/index.js', 'plugin.wasm')."
+    },
+    "permissions": {
+      "type": "array",
+      "description": "Ensemble strict des permissions système sollicitées par le plugin selon le principe de moindre privilège.",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "library:read",
+          "library:write",
+          "metadata:read",
+          "metadata:write",
+          "playback:read",
+          "playback:write",
+          "storage:read",
+          "storage:write",
+          "network:outbound",
+          "system:notifications"
+        ]
+      }
+    },
+    "type": {
+      "type": "string",
+      "description": "Typologie ou catégorie principale du plugin au sein du serveur Norylum.",
+      "enum": [
+        "metadata",
+        "subtitles",
+        "scanner",
+        "transcoder",
+        "auth",
+        "notifications",
+        "generic"
+      ],
+      "default": "generic"
+    },
+    "author": {
+      "description": "Identité de l'auteur, du mainteneur ou de l'organisation créatrice du plugin.",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 2
+        },
+        {
+          "type": "object",
+          "required": ["name"],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 2
+            },
+            "email": {
+              "type": "string",
+              "format": "email"
+            },
+            "url": {
+              "type": "string",
+              "format": "uri"
+            }
+          }
+        }
+      ]
+    },
+    "homepage": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL de la documentation ou du site web officiel du plugin."
+    },
+    "repository": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL du dépôt public hébergeant le code source (ex. GitHub, GitLab)."
+    },
+    "license": {
+      "type": "string",
+      "description": "Identifiant standard de licence open-source (SPDX, ex. 'GPL-3.0-or-later', 'MIT', 'Apache-2.0').",
+      "default": "GPL-3.0-or-later"
+    },
+    "norylum_version": {
+      "type": "string",
+      "description": "Contrainte de version compatible du serveur hôte Norylum (ex. '>=1.0.0')."
+    },
+    "settings_schema": {
+      "type": "object",
+      "description": "Schéma JSON des paramètres utilisateur configurables via l'interface d'administration."
+    },
+    "dependencies": {
+      "type": "object",
+      "description": "Dépendances logicielles optionnelles vers d'autres plugins Norylum requis.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "id": "tmdb-metadata",
+      "name": "TheMovieDB Metadata Provider",
+      "version": "1.0.0",
+      "description": "Enrichit automatiquement les fiches films et séries avec affiches, synopsis et notations TMDB.",
+      "entrypoint": "dist/index.js",
+      "type": "metadata",
+      "permissions": [
+        "library:read",
+        "metadata:write",
+        "network:outbound"
+      ],
+      "author": {
+        "name": "Norylum Community",
+        "url": "https://github.com/norylum"
+      },
+      "license": "GPL-3.0-or-later",
+      "homepage": "https://norylum.org/plugins/tmdb-metadata",
+      "repository": "https://github.com/norylum/plugin-tmdb-metadata",
+      "norylum_version": ">=1.0.0"
+    }
+  ]
+}
+
